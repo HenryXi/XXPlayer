@@ -41,6 +41,7 @@ import java.util.Map;
 public class MainActivity extends AppCompatActivity {
 
     private static final int REQUEST_PERMISSIONS = 1001;
+    private static final long AUTO_HIDE_LIST_DELAY_MS = 3000L;
     private static final List<String> SUPPORTED_EXTENSIONS = Arrays.asList("mp4", "mkv", "avi", "3gp", "mov");
 
     private SurfaceView surfaceView;
@@ -73,6 +74,15 @@ public class MainActivity extends AppCompatActivity {
     private int baselineLandscapeOrientation = -1;
     private float currentVideoRotation;
     private boolean keepScreenOnActive;
+    private boolean listInteractionSincePlaybackStart;
+    private final Runnable autoHideListRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (!listInteractionSincePlaybackStart && isPlayingNow() && isListDrawerOpen()) {
+                drawerLayout.closeDrawer(GravityCompat.START);
+            }
+        }
+    };
     private final Runnable progressRunnable = new Runnable() {
         @Override
         public void run() {
@@ -87,6 +97,8 @@ public class MainActivity extends AppCompatActivity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
+        PlayerLogger.init(this);
+        PlayerLogger.i("Lifecycle", "onCreate sdk=" + Build.VERSION.SDK_INT + " device=" + Build.MODEL);
 
         dbHelper = new VideoStatsDbHelper(this);
 
@@ -97,8 +109,10 @@ public class MainActivity extends AppCompatActivity {
         setupOrientationCorrection();
 
         if (hasRequiredPermissions()) {
+            PlayerLogger.i("Permission", "granted at startup");
             loadVideoList();
         } else {
+            PlayerLogger.w("Permission", "request required permissions");
             requestRequiredPermissions();
         }
     }
@@ -137,7 +151,12 @@ public class MainActivity extends AppCompatActivity {
     private void setupList() {
         adapter = new VideoFileAdapter(this);
         listVideos.setAdapter(adapter);
+        listVideos.setOnTouchListener((v, event) -> {
+            markListInteraction();
+            return false;
+        });
         listVideos.setOnItemClickListener((parent, view, position, id) -> {
+            markListInteraction();
             File file = adapter.getItemAt(position);
             playVideo(file);
         });
@@ -152,6 +171,7 @@ public class MainActivity extends AppCompatActivity {
             @Override
             public void surfaceCreated(@NonNull SurfaceHolder holder) {
                 surfaceHolder = holder;
+                PlayerLogger.i("Surface", "surfaceCreated");
                 attachDisplayIfReady();
                 tryRestorePlaybackIfNeeded();
             }
@@ -159,11 +179,13 @@ public class MainActivity extends AppCompatActivity {
             @Override
             public void surfaceChanged(@NonNull SurfaceHolder holder, int format, int width, int height) {
                 surfaceHolder = holder;
+                PlayerLogger.i("Surface", "surfaceChanged width=" + width + " height=" + height);
                 attachDisplayIfReady();
             }
 
             @Override
             public void surfaceDestroyed(@NonNull SurfaceHolder holder) {
+                PlayerLogger.w("Surface", "surfaceDestroyed");
                 if (mediaPlayer != null) {
                     try {
                         if (mediaPlayer.isPlaying()) {
@@ -184,8 +206,12 @@ public class MainActivity extends AppCompatActivity {
 
     private void setupButtons() {
         buttonPlay.setOnClickListener(v -> resumePlayback());
-        buttonToggleList.setOnClickListener(v -> toggleListDrawer());
+        buttonToggleList.setOnClickListener(v -> {
+            markListInteraction();
+            toggleListDrawer();
+        });
         videoContainer.setOnClickListener(v -> {
+            markListInteraction();
             if (isListDrawerOpen()) {
                 drawerLayout.closeDrawer(GravityCompat.START);
                 return;
@@ -199,11 +225,12 @@ public class MainActivity extends AppCompatActivity {
     private void setupListDrawer() {
         drawerLayout.setScrimColor(Color.TRANSPARENT);
         drawerLayout.setDrawerLockMode(DrawerLayout.LOCK_MODE_UNLOCKED, GravityCompat.START);
-        drawerLayout.post(() -> drawerLayout.closeDrawer(GravityCompat.START, false));
+        drawerLayout.post(() -> drawerLayout.openDrawer(GravityCompat.START, false));
 
         drawerLayout.addDrawerListener(new DrawerLayout.SimpleDrawerListener() {
             @Override
             public void onDrawerSlide(@NonNull View drawerView, float slideOffset) {
+                markListInteraction();
                 updateDrawerToggleVisual(slideOffset);
             }
 
@@ -258,6 +285,7 @@ public class MainActivity extends AppCompatActivity {
         if (!dir.exists() || !dir.isDirectory()) {
             videos.clear();
             adapter.submit(videos);
+            PlayerLogger.e("LoadList", "video dir missing: " + AppConfig.VIDEO_DIR_PATH, null);
             Toast.makeText(this, R.string.status_dir_missing, Toast.LENGTH_LONG).show();
             return;
         }
@@ -287,7 +315,10 @@ public class MainActivity extends AppCompatActivity {
         adapter.updatePlayCounts(countsByPath);
 
         if (videos.isEmpty()) {
+            PlayerLogger.w("LoadList", "no video found in " + AppConfig.VIDEO_DIR_PATH);
             Toast.makeText(this, R.string.status_no_video_found, Toast.LENGTH_LONG).show();
+        } else {
+            PlayerLogger.i("LoadList", "found videos=" + videos.size());
         }
     }
 
@@ -302,10 +333,12 @@ public class MainActivity extends AppCompatActivity {
 
     private void playVideo(File file) {
         if (surfaceHolder == null) {
+            PlayerLogger.w("Play", "surface not ready, file=" + file.getAbsolutePath());
             Toast.makeText(this, R.string.surface_not_ready, Toast.LENGTH_SHORT).show();
             return;
         }
 
+        PlayerLogger.i("Play", "select file=" + file.getAbsolutePath());
         currentVideoFile = file;
         resumePositionMs = 0;
         resumeWhenReady = true;
@@ -317,6 +350,7 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
         mediaPlayer.pause();
+        cancelAutoHideList();
         updateScreenAwakeState(false);
         resumeWhenReady = false;
         resumePositionMs = safeCurrentPosition();
@@ -360,6 +394,7 @@ public class MainActivity extends AppCompatActivity {
 
     private void releasePlayer() {
         stopProgressUpdates();
+        cancelAutoHideList();
         updateScreenAwakeState(false);
         playerPrepared = false;
         pendingSeekPositionMs = 0;
@@ -381,6 +416,7 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onPause() {
         super.onPause();
+        PlayerLogger.i("Lifecycle", "onPause playing=" + isPlayingNow());
         updateScreenAwakeState(false);
         if (orientationListener != null) {
             orientationListener.disable();
@@ -409,6 +445,7 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onStop() {
         super.onStop();
+        PlayerLogger.i("Lifecycle", "onStop current=" + (currentVideoFile == null ? "null" : currentVideoFile.getName()));
         updateScreenAwakeState(false);
         if (mediaPlayer != null) {
             resumePositionMs = safeCurrentPosition();
@@ -420,6 +457,7 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onResume() {
         super.onResume();
+        PlayerLogger.i("Lifecycle", "onResume");
         if (orientationListener != null && orientationListener.canDetectOrientation()) {
             orientationListener.enable();
         }
@@ -430,6 +468,7 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        PlayerLogger.i("Lifecycle", "onDestroy");
         if (orientationListener != null) {
             orientationListener.disable();
         }
@@ -515,12 +554,14 @@ public class MainActivity extends AppCompatActivity {
 
         for (int result : grantResults) {
             if (result != PackageManager.PERMISSION_GRANTED) {
+                PlayerLogger.w("Permission", "denied, finish activity");
                 Toast.makeText(this, R.string.permission_required_exit, Toast.LENGTH_LONG).show();
                 finish();
                 return;
             }
         }
 
+        PlayerLogger.i("Permission", "granted by user");
         loadVideoList();
     }
 
@@ -546,6 +587,8 @@ public class MainActivity extends AppCompatActivity {
         if (recoveringPlayer || currentVideoFile == null || surfaceHolder == null || mediaPlayer != null) {
             return;
         }
+        PlayerLogger.i("PlayRestore", "rebuild player file=" + currentVideoFile.getAbsolutePath()
+                + " resumeMs=" + Math.max(0, resumePositionMs) + " autoStart=" + resumeWhenReady);
         createAndPreparePlayer(currentVideoFile, Math.max(0, resumePositionMs), resumeWhenReady);
     }
 
@@ -553,6 +596,8 @@ public class MainActivity extends AppCompatActivity {
         releasePlayer();
         resumeWhenReady = autoStart;
         recoveringPlayer = true;
+        PlayerLogger.i("Prepare", "create player file=" + file.getAbsolutePath()
+                + " startMs=" + startPositionMs + " autoStart=" + autoStart);
         try {
             mediaPlayer = new MediaPlayer();
             mediaPlayer.setDisplay(surfaceHolder);
@@ -571,6 +616,9 @@ public class MainActivity extends AppCompatActivity {
                 recoveringPlayer = false;
                 playerPrepared = true;
                 currentVideoFile = file;
+                PlayerLogger.i("Prepared", "durationMs=" + mp.getDuration()
+                        + " size=" + mp.getVideoWidth() + "x" + mp.getVideoHeight()
+                        + " startMs=" + startPositionMs + " autoStart=" + resumeWhenReady);
                 buttonPlay.setEnabled(true);
                 applyVideoAspect(mp.getVideoWidth(), mp.getVideoHeight());
                 seekProgress.setMax(Math.max(1, mp.getDuration()));
@@ -598,7 +646,9 @@ public class MainActivity extends AppCompatActivity {
                 }
             });
             mediaPlayer.setOnCompletionListener(mp -> {
+                PlayerLogger.i("Completion", "complete file=" + (currentVideoFile == null ? "null" : currentVideoFile.getAbsolutePath()));
                 stopProgressUpdates();
+                cancelAutoHideList();
                 updateScreenAwakeState(false);
                 resumePositionMs = 0;
                 resumeWhenReady = false;
@@ -620,12 +670,14 @@ public class MainActivity extends AppCompatActivity {
                 }
             });
             mediaPlayer.setOnErrorListener((mp, what, extra) -> {
+                PlayerLogger.e("MediaError", buildPlayerState("what=" + what + " extra=" + extra), null);
                 handlePlayerFailure();
                 return true;
             });
             mediaPlayer.prepareAsync();
         } catch (IOException e) {
             recoveringPlayer = false;
+            PlayerLogger.e("Prepare", "prepare failed file=" + file.getAbsolutePath(), e);
             Toast.makeText(this, R.string.status_player_error, Toast.LENGTH_SHORT).show();
             releasePlayer();
             showPlayOverlay();
@@ -633,7 +685,9 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void handlePlayerFailure() {
+        PlayerLogger.w("Recover", "handle failure " + buildPlayerState("before_recover"));
         stopProgressUpdates();
+        cancelAutoHideList();
         updateScreenAwakeState(false);
         int fallbackPosition = safeCurrentPosition();
         if (fallbackPosition > 0) {
@@ -652,10 +706,13 @@ public class MainActivity extends AppCompatActivity {
         }
         try {
             mediaPlayer.start();
+            PlayerLogger.i("Start", buildPlayerState("start_ok"));
+            scheduleAutoHideListAfterPlaybackStart();
             updateScreenAwakeState(true);
             startProgressUpdates();
             hidePlayOverlay();
         } catch (IllegalStateException e) {
+            PlayerLogger.e("Start", buildPlayerState("start_illegal_state"), e);
             handlePlayerFailure();
         }
     }
@@ -672,6 +729,42 @@ public class MainActivity extends AppCompatActivity {
         }
         videoContainer.setKeepScreenOn(keepOn);
         surfaceView.setKeepScreenOn(keepOn);
+    }
+
+    private void scheduleAutoHideListAfterPlaybackStart() {
+        listInteractionSincePlaybackStart = false;
+        progressHandler.removeCallbacks(autoHideListRunnable);
+        progressHandler.postDelayed(autoHideListRunnable, AUTO_HIDE_LIST_DELAY_MS);
+    }
+
+    private void cancelAutoHideList() {
+        progressHandler.removeCallbacks(autoHideListRunnable);
+    }
+
+    private void markListInteraction() {
+        listInteractionSincePlaybackStart = true;
+        cancelAutoHideList();
+    }
+
+    private String buildPlayerState(String prefix) {
+        String filePath = currentVideoFile == null ? "null" : currentVideoFile.getAbsolutePath();
+        int position = safeCurrentPosition();
+        int duration = 0;
+        if (mediaPlayer != null && playerPrepared) {
+            try {
+                duration = mediaPlayer.getDuration();
+            } catch (IllegalStateException ignored) {
+                duration = -1;
+            }
+        }
+        return prefix
+                + " file=" + filePath
+                + " prepared=" + playerPrepared
+                + " recovering=" + recoveringPlayer
+                + " resumeWhenReady=" + resumeWhenReady
+                + " positionMs=" + position
+                + " durationMs=" + duration
+                + " hasSurface=" + (surfaceHolder != null);
     }
 
     private int safeCurrentPosition() {
