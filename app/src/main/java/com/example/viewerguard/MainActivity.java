@@ -2,15 +2,18 @@ package com.example.viewerguard;
 
 import android.Manifest;
 import android.content.pm.PackageManager;
+import android.graphics.Color;
 import android.graphics.Point;
 import android.media.MediaPlayer;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.view.Gravity;
+import android.view.OrientationEventListener;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 import android.view.View;
+import android.view.WindowManager;
 import android.widget.FrameLayout;
 import android.widget.ImageButton;
 import android.widget.ListView;
@@ -22,12 +25,15 @@ import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
+import androidx.core.view.GravityCompat;
+import androidx.drawerlayout.widget.DrawerLayout;
 
 import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -40,13 +46,17 @@ public class MainActivity extends AppCompatActivity {
     private SurfaceView surfaceView;
     private FrameLayout videoContainer;
     private ImageButton buttonPlay;
+    private ImageButton buttonToggleList;
     private ListView listVideos;
+    private FrameLayout listDrawer;
+    private DrawerLayout drawerLayout;
     private ProgressBar seekProgress;
     private TextView textCurrentTime;
     private TextView textTotalTime;
 
     private VideoFileAdapter adapter;
     private List<File> videos = new ArrayList<>();
+    private final Map<String, String> videoMd5ByPath = new HashMap<>();
     private final Handler progressHandler = new Handler();
 
     private SurfaceHolder surfaceHolder;
@@ -57,6 +67,12 @@ public class MainActivity extends AppCompatActivity {
     private int resumePositionMs;
     private boolean resumeWhenReady;
     private boolean recoveringPlayer;
+    private int pendingSeekPositionMs;
+    private boolean pendingStartAfterSeek;
+    private OrientationEventListener orientationListener;
+    private int baselineLandscapeOrientation = -1;
+    private float currentVideoRotation;
+    private boolean keepScreenOnActive;
     private final Runnable progressRunnable = new Runnable() {
         @Override
         public void run() {
@@ -78,6 +94,7 @@ public class MainActivity extends AppCompatActivity {
         setupList();
         setupSurface();
         setupButtons();
+        setupOrientationCorrection();
 
         if (hasRequiredPermissions()) {
             loadVideoList();
@@ -90,7 +107,10 @@ public class MainActivity extends AppCompatActivity {
         surfaceView = findViewById(R.id.surfaceView);
         videoContainer = findViewById(R.id.videoContainer);
         buttonPlay = findViewById(R.id.buttonPlay);
+        buttonToggleList = findViewById(R.id.buttonToggleList);
         listVideos = findViewById(R.id.listVideos);
+        listDrawer = findViewById(R.id.listDrawer);
+        drawerLayout = findViewById(R.id.drawerLayout);
         seekProgress = findViewById(R.id.seekProgress);
         textCurrentTime = findViewById(R.id.textCurrentTime);
         textTotalTime = findViewById(R.id.textTotalTime);
@@ -104,6 +124,14 @@ public class MainActivity extends AppCompatActivity {
         resumePositionMs = 0;
         resumeWhenReady = false;
         recoveringPlayer = false;
+        pendingSeekPositionMs = 0;
+        pendingStartAfterSeek = false;
+        currentVideoRotation = 0f;
+        keepScreenOnActive = false;
+        surfaceView.setRotation(currentVideoRotation);
+        updateScreenAwakeState(false);
+
+        setupListDrawer();
     }
 
     private void setupList() {
@@ -140,6 +168,10 @@ public class MainActivity extends AppCompatActivity {
                     try {
                         if (mediaPlayer.isPlaying()) {
                             mediaPlayer.pause();
+                            resumePositionMs = safeCurrentPosition();
+                            resumeWhenReady = false;
+                            stopProgressUpdates();
+                            updatePlaybackProgress();
                             showPlayOverlay();
                         }
                     } catch (IllegalStateException ignored) {
@@ -152,11 +184,73 @@ public class MainActivity extends AppCompatActivity {
 
     private void setupButtons() {
         buttonPlay.setOnClickListener(v -> resumePlayback());
+        buttonToggleList.setOnClickListener(v -> toggleListDrawer());
         videoContainer.setOnClickListener(v -> {
+            if (isListDrawerOpen()) {
+                drawerLayout.closeDrawer(GravityCompat.START);
+                return;
+            }
             if (isPlayingNow()) {
                 pauseByUser();
             }
         });
+    }
+
+    private void setupListDrawer() {
+        drawerLayout.setScrimColor(Color.TRANSPARENT);
+        drawerLayout.setDrawerLockMode(DrawerLayout.LOCK_MODE_UNLOCKED, GravityCompat.START);
+        drawerLayout.post(() -> drawerLayout.closeDrawer(GravityCompat.START, false));
+
+        drawerLayout.addDrawerListener(new DrawerLayout.SimpleDrawerListener() {
+            @Override
+            public void onDrawerSlide(@NonNull View drawerView, float slideOffset) {
+                updateDrawerToggleVisual(slideOffset);
+            }
+
+            @Override
+            public void onDrawerOpened(@NonNull View drawerView) {
+                updateDrawerToggleVisual(1f);
+            }
+
+            @Override
+            public void onDrawerClosed(@NonNull View drawerView) {
+                updateDrawerToggleVisual(0f);
+            }
+        });
+
+        listDrawer.post(() -> updateDrawerToggleVisual(isListDrawerOpen() ? 1f : 0f));
+    }
+
+    private void updateDrawerToggleVisual(float slideOffset) {
+        int drawerWidth = listDrawer.getWidth();
+        if (drawerWidth <= 0) {
+            return;
+        }
+
+        buttonToggleList.setTranslationX(drawerWidth * slideOffset);
+        // Keep the handle visible but less distracting when the list is collapsed.
+        float minAlphaWhenClosed = 0.22f;
+        float maxAlphaWhenOpened = 0.55f;
+        buttonToggleList.setAlpha(minAlphaWhenClosed + (maxAlphaWhenOpened - minAlphaWhenClosed) * slideOffset);
+        if (slideOffset > 0.5f) {
+            buttonToggleList.setImageResource(android.R.drawable.ic_media_next);
+            buttonToggleList.setContentDescription(getString(R.string.hide_file_list));
+        } else {
+            buttonToggleList.setImageResource(android.R.drawable.ic_media_previous);
+            buttonToggleList.setContentDescription(getString(R.string.show_file_list));
+        }
+    }
+
+    private boolean isListDrawerOpen() {
+        return drawerLayout != null && drawerLayout.isDrawerOpen(GravityCompat.START);
+    }
+
+    private void toggleListDrawer() {
+        if (isListDrawerOpen()) {
+            drawerLayout.closeDrawer(GravityCompat.START);
+        } else {
+            drawerLayout.openDrawer(GravityCompat.START);
+        }
     }
 
     private void loadVideoList() {
@@ -177,8 +271,20 @@ public class MainActivity extends AppCompatActivity {
         Collections.sort(videos, (a, b) -> a.getName().compareToIgnoreCase(b.getName()));
         adapter.submit(videos);
 
-        Map<String, Integer> counts = dbHelper.queryAllPlayCounts();
-        adapter.updatePlayCounts(counts);
+        Map<String, Integer> countsByMd5 = dbHelper.queryAllPlayCounts();
+        Map<String, Integer> countsByPath = new HashMap<>();
+        videoMd5ByPath.clear();
+        for (File file : videos) {
+            String path = file.getAbsolutePath();
+            String md5 = FileMd5Utils.md5(file);
+            if (md5 != null) {
+                videoMd5ByPath.put(path, md5);
+                countsByPath.put(path, countsByMd5.getOrDefault(md5, 0));
+            } else {
+                countsByPath.put(path, 0);
+            }
+        }
+        adapter.updatePlayCounts(countsByPath);
 
         if (videos.isEmpty()) {
             Toast.makeText(this, R.string.status_no_video_found, Toast.LENGTH_LONG).show();
@@ -211,6 +317,7 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
         mediaPlayer.pause();
+        updateScreenAwakeState(false);
         resumeWhenReady = false;
         resumePositionMs = safeCurrentPosition();
         stopProgressUpdates();
@@ -233,14 +340,17 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
         if (!mediaPlayer.isPlaying()) {
+            if (pendingSeekPositionMs > 0) {
+                pendingStartAfterSeek = true;
+                hidePlayOverlay();
+                return;
+            }
             try {
-                mediaPlayer.start();
+                startPlaybackSafely();
             } catch (IllegalStateException e) {
                 handlePlayerFailure();
                 return;
             }
-            startProgressUpdates();
-            hidePlayOverlay();
         }
     }
 
@@ -250,7 +360,10 @@ public class MainActivity extends AppCompatActivity {
 
     private void releasePlayer() {
         stopProgressUpdates();
+        updateScreenAwakeState(false);
         playerPrepared = false;
+        pendingSeekPositionMs = 0;
+        pendingStartAfterSeek = false;
         if (mediaPlayer != null) {
             try {
                 mediaPlayer.stop();
@@ -268,15 +381,21 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onPause() {
         super.onPause();
+        updateScreenAwakeState(false);
+        if (orientationListener != null) {
+            orientationListener.disable();
+        }
         if (mediaPlayer != null && mediaPlayer.isPlaying()) {
             mediaPlayer.pause();
             resumePositionMs = safeCurrentPosition();
-            resumeWhenReady = true;
+            // Back to home should pause and wait for explicit user tap to resume.
+            resumeWhenReady = false;
             stopProgressUpdates();
             updatePlaybackProgress();
             showPlayOverlay();
         } else if (playerPrepared) {
             resumePositionMs = safeCurrentPosition();
+            resumeWhenReady = false;
             updatePlaybackProgress();
         }
     }
@@ -290,15 +409,20 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onStop() {
         super.onStop();
-        if (playerPrepared) {
+        updateScreenAwakeState(false);
+        if (mediaPlayer != null) {
             resumePositionMs = safeCurrentPosition();
         }
+        resumeWhenReady = false;
         releasePlayer();
     }
 
     @Override
     protected void onResume() {
         super.onResume();
+        if (orientationListener != null && orientationListener.canDetectOrientation()) {
+            orientationListener.enable();
+        }
         attachDisplayIfReady();
         tryRestorePlaybackIfNeeded();
     }
@@ -306,10 +430,60 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        if (orientationListener != null) {
+            orientationListener.disable();
+        }
         releasePlayer();
         if (dbHelper != null) {
             dbHelper.close();
         }
+    }
+
+    private void setupOrientationCorrection() {
+        orientationListener = new OrientationEventListener(this) {
+            @Override
+            public void onOrientationChanged(int orientation) {
+                if (orientation == ORIENTATION_UNKNOWN) {
+                    return;
+                }
+                int snapped = snapToRightAngle(orientation);
+                if (snapped != 90 && snapped != 270) {
+                    return;
+                }
+                if (baselineLandscapeOrientation == -1) {
+                    baselineLandscapeOrientation = snapped;
+                }
+                float targetRotation = snapped == baselineLandscapeOrientation ? 0f : 180f;
+                applyVideoRotation(targetRotation);
+            }
+        };
+        if (orientationListener.canDetectOrientation()) {
+            orientationListener.enable();
+        }
+    }
+
+    private int snapToRightAngle(int orientation) {
+        return ((orientation + 45) / 90 * 90) % 360;
+    }
+
+    private void applyVideoRotation(float targetRotation) {
+        if (Float.compare(currentVideoRotation, targetRotation) == 0) {
+            return;
+        }
+        currentVideoRotation = targetRotation;
+        surfaceView.animate()
+                .rotation(targetRotation)
+                .setDuration(220)
+                .start();
+    }
+
+    @Override
+    public void onBackPressed() {
+        if (isListDrawerOpen()) {
+            drawerLayout.closeDrawer(GravityCompat.START);
+            return;
+        }
+        super.onBackPressed();
     }
 
     private boolean hasRequiredPermissions() {
@@ -384,6 +558,15 @@ public class MainActivity extends AppCompatActivity {
             mediaPlayer.setDisplay(surfaceHolder);
             mediaPlayer.setDataSource(file.getAbsolutePath());
             mediaPlayer.setOnVideoSizeChangedListener((mp, width, height) -> applyVideoAspect(width, height));
+            mediaPlayer.setOnSeekCompleteListener(mp -> {
+                pendingSeekPositionMs = 0;
+                if (pendingStartAfterSeek) {
+                    pendingStartAfterSeek = false;
+                    startPlaybackSafely();
+                } else {
+                    updatePlaybackProgress();
+                }
+            });
             mediaPlayer.setOnPreparedListener(mp -> {
                 recoveringPlayer = false;
                 playerPrepared = true;
@@ -393,20 +576,22 @@ public class MainActivity extends AppCompatActivity {
                 seekProgress.setMax(Math.max(1, mp.getDuration()));
                 textTotalTime.setText(formatTime(mp.getDuration()));
                 if (startPositionMs > 0) {
+                    pendingSeekPositionMs = startPositionMs;
+                    pendingStartAfterSeek = resumeWhenReady;
                     try {
                         mp.seekTo(startPositionMs);
                     } catch (IllegalStateException ignored) {
+                        pendingSeekPositionMs = 0;
+                        pendingStartAfterSeek = false;
                     }
+                    if (!resumeWhenReady) {
+                        showPlayOverlay();
+                    }
+                    return;
                 }
                 updatePlaybackProgress();
                 if (resumeWhenReady) {
-                    try {
-                        mp.start();
-                        startProgressUpdates();
-                        hidePlayOverlay();
-                    } catch (IllegalStateException e) {
-                        handlePlayerFailure();
-                    }
+                    startPlaybackSafely();
                 } else {
                     stopProgressUpdates();
                     showPlayOverlay();
@@ -414,13 +599,24 @@ public class MainActivity extends AppCompatActivity {
             });
             mediaPlayer.setOnCompletionListener(mp -> {
                 stopProgressUpdates();
+                updateScreenAwakeState(false);
                 resumePositionMs = 0;
                 resumeWhenReady = false;
                 updatePlaybackProgress();
                 showPlayOverlay();
                 if (currentVideoFile != null) {
-                    int newCount = dbHelper.incrementPlayCount(currentVideoFile.getAbsolutePath(), currentVideoFile.getName());
-                    adapter.updateSinglePlayCount(currentVideoFile.getAbsolutePath(), newCount);
+                    String path = currentVideoFile.getAbsolutePath();
+                    String md5 = videoMd5ByPath.get(path);
+                    if (md5 == null) {
+                        md5 = FileMd5Utils.md5(currentVideoFile);
+                        if (md5 != null) {
+                            videoMd5ByPath.put(path, md5);
+                        }
+                    }
+                    if (md5 != null) {
+                        int newCount = dbHelper.incrementPlayCount(md5, path, currentVideoFile.getName());
+                        adapter.updateSinglePlayCount(path, newCount);
+                    }
                 }
             });
             mediaPlayer.setOnErrorListener((mp, what, extra) -> {
@@ -438,6 +634,7 @@ public class MainActivity extends AppCompatActivity {
 
     private void handlePlayerFailure() {
         stopProgressUpdates();
+        updateScreenAwakeState(false);
         int fallbackPosition = safeCurrentPosition();
         if (fallbackPosition > 0) {
             resumePositionMs = fallbackPosition;
@@ -447,6 +644,34 @@ public class MainActivity extends AppCompatActivity {
         showPlayOverlay();
         Toast.makeText(this, R.string.status_player_recovering, Toast.LENGTH_SHORT).show();
         tryRestorePlaybackIfNeeded();
+    }
+
+    private void startPlaybackSafely() {
+        if (mediaPlayer == null || !playerPrepared) {
+            return;
+        }
+        try {
+            mediaPlayer.start();
+            updateScreenAwakeState(true);
+            startProgressUpdates();
+            hidePlayOverlay();
+        } catch (IllegalStateException e) {
+            handlePlayerFailure();
+        }
+    }
+
+    private void updateScreenAwakeState(boolean keepOn) {
+        if (keepScreenOnActive == keepOn) {
+            return;
+        }
+        keepScreenOnActive = keepOn;
+        if (keepOn) {
+            getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        } else {
+            getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        }
+        videoContainer.setKeepScreenOn(keepOn);
+        surfaceView.setKeepScreenOn(keepOn);
     }
 
     private int safeCurrentPosition() {
