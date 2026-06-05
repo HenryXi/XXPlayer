@@ -1,0 +1,45 @@
+# macOS
+.DS_Store
+
+# IntelliJ / Android Studio
+.idea/
+*.iml
+local.properties
+captures/
+.navigation/
+
+# Gradle
+.gradle/
+.gradle-home/
+.android-sdk/
+build/
+**/build/
+
+# Kotlin/Java compile artifacts
+*.class
+
+# Logs
+*.log
+
+# Android generated files
+app/release/
+app/debug/
+app/profile/
+app/src/main/generated/
+
+# NDK / CMake
+.cxx/
+.externalNativeBuild/
+
+# Signing / secrets
+*.jks
+*.keystore
+keystore.properties
+
+# Firebase / Google services local variants (keep only if really needed)
+google-services.json
+
+# Temporary files
+*.tmp
+*.swp
+*~
