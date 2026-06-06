@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <androidx.drawerlayout.widget.DrawerLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:id="@+id/drawerLayout"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
@@ -21,10 +22,27 @@
                 android:layout_height="0dp"
                 android:layout_weight="1">
 
-                <SurfaceView
+                <TextureView
                     android:id="@+id/surfaceView"
                     android:layout_width="match_parent"
                     android:layout_height="match_parent" />
+
+                <ImageView
+                    android:id="@+id/imageThumbnail"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:scaleType="centerCrop"
+                    android:visibility="gone"
+                    android:contentDescription="@string/video_thumbnail" />
+
+                <com.airbnb.lottie.LottieAnimationView
+                    android:id="@+id/animationView"
+                    android:layout_width="200dp"
+                    android:layout_height="200dp"
+                    android:layout_gravity="center"
+                    app:lottie_fileName="video_player_animation.json"
+                    app:lottie_loop="true"
+                    app:lottie_autoPlay="true" />
 
                 <ImageButton
                     android:id="@+id/buttonPlay"
@@ -36,6 +54,35 @@
                     android:padding="14dp"
                     android:scaleType="fitCenter"
                     android:src="@android:drawable/ic_media_play" />
+
+                <LinearLayout
+                    android:id="@+id/statusOverlay"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_gravity="top|end"
+                    android:background="#80000000"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal"
+                    android:paddingStart="8dp"
+                    android:paddingTop="4dp"
+                    android:paddingEnd="8dp"
+                    android:paddingBottom="4dp">
+
+                    <TextView
+                        android:id="@+id/textClock"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:textColor="#FFFFFFFF"
+                        android:textSize="12sp" />
+
+                    <TextView
+                        android:id="@+id/textBattery"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="8dp"
+                        android:textColor="#FFFFFFFF"
+                        android:textSize="12sp" />
+                </LinearLayout>
             </FrameLayout>
 
             <ProgressBar
@@ -103,10 +150,29 @@
         android:layout_gravity="start"
         android:background="#FFF2F2F2">
 
-        <ListView
-            android:id="@+id/listVideos"
+        <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="match_parent"
-            android:dividerHeight="1dp" />
+            android:orientation="vertical">
+
+            <TextView
+                android:id="@+id/textTotalPlayCount"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:background="#FFFFFFFF"
+                android:gravity="center"
+                android:padding="16dp"
+                android:text="0"
+                android:textColor="#FF000000"
+                android:textSize="32sp"
+                android:textStyle="bold" />
+
+            <ListView
+                android:id="@+id/listVideos"
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1"
+                android:dividerHeight="1dp" />
+        </LinearLayout>
     </FrameLayout>
 </androidx.drawerlayout.widget.DrawerLayout>

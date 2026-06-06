@@ -1,25 +1,36 @@
 package com.example.viewerguard;
 
 import android.Manifest;
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.pm.PackageManager;
+import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.graphics.Point;
+import android.media.MediaMetadataRetriever;
 import android.media.MediaPlayer;
+import android.os.BatteryManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
+import android.graphics.SurfaceTexture;
 import android.view.Gravity;
 import android.view.OrientationEventListener;
-import android.view.SurfaceHolder;
-import android.view.SurfaceView;
+import android.view.Surface;
+import android.view.TextureView;
 import android.view.View;
 import android.view.WindowManager;
 import android.widget.FrameLayout;
 import android.widget.ImageButton;
+import android.widget.ImageView;
 import android.widget.ListView;
 import android.widget.ProgressBar;
 import android.widget.TextView;
 import android.widget.Toast;
+
+import com.airbnb.lottie.LottieAnimationView;
 
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
@@ -30,13 +41,13 @@ import androidx.drawerlayout.widget.DrawerLayout;
 
 import java.io.File;
 import java.io.IOException;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
-import java.util.HashMap;
+import java.util.Date;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
 
 public class MainActivity extends AppCompatActivity {
 
@@ -44,7 +55,7 @@ public class MainActivity extends AppCompatActivity {
     private static final long AUTO_HIDE_LIST_DELAY_MS = 3000L;
     private static final List<String> SUPPORTED_EXTENSIONS = Arrays.asList("mp4", "mkv", "avi", "3gp", "mov");
 
-    private SurfaceView surfaceView;
+    private TextureView surfaceView;
     private FrameLayout videoContainer;
     private ImageButton buttonPlay;
     private ImageButton buttonToggleList;
@@ -54,17 +65,31 @@ public class MainActivity extends AppCompatActivity {
     private ProgressBar seekProgress;
     private TextView textCurrentTime;
     private TextView textTotalTime;
+    private TextView textTotalPlayCount;
+    private TextView textClock;
+    private TextView textBattery;
+    private LottieAnimationView animationView;
+    private ImageView imageThumbnail;
 
     private VideoFileAdapter adapter;
     private List<File> videos = new ArrayList<>();
-    private final Map<String, String> videoMd5ByPath = new HashMap<>();
     private final Handler progressHandler = new Handler();
+    private int totalPlayCount = 0;
+    private boolean playCountedForCurrentFile = false;
 
-    private SurfaceHolder surfaceHolder;
+    private BroadcastReceiver batteryReceiver;
+    private final Runnable clockRunnable = new Runnable() {
+        @Override
+        public void run() {
+            updateClock();
+            progressHandler.postDelayed(this, 30000);
+        }
+    };
+
+    private Surface surface;
     private MediaPlayer mediaPlayer;
     private boolean playerPrepared;
     private File currentVideoFile;
-    private VideoStatsDbHelper dbHelper;
     private int resumePositionMs;
     private boolean resumeWhenReady;
     private boolean recoveringPlayer;
@@ -74,11 +99,10 @@ public class MainActivity extends AppCompatActivity {
     private int baselineLandscapeOrientation = -1;
     private float currentVideoRotation;
     private boolean keepScreenOnActive;
-    private boolean listInteractionSincePlaybackStart;
     private final Runnable autoHideListRunnable = new Runnable() {
         @Override
         public void run() {
-            if (!listInteractionSincePlaybackStart && isPlayingNow() && isListDrawerOpen()) {
+            if (isPlayingNow() && isListDrawerOpen()) {
                 drawerLayout.closeDrawer(GravityCompat.START);
             }
         }
@@ -100,8 +124,6 @@ public class MainActivity extends AppCompatActivity {
         PlayerLogger.init(this);
         PlayerLogger.i("Lifecycle", "onCreate sdk=" + Build.VERSION.SDK_INT + " device=" + Build.MODEL);
 
-        dbHelper = new VideoStatsDbHelper(this);
-
         bindViews();
         setupList();
         setupSurface();
@@ -115,6 +137,21 @@ public class MainActivity extends AppCompatActivity {
             PlayerLogger.w("Permission", "request required permissions");
             requestRequiredPermissions();
         }
+
+        batteryReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                int level = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1);
+                int scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, 100);
+                if (scale > 0 && textBattery != null) {
+                    int pct = (int) (level * 100f / scale);
+                    textBattery.setText(pct + "%");
+                }
+            }
+        };
+        registerReceiver(batteryReceiver, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
+        updateClock();
+        progressHandler.postDelayed(clockRunnable, 30000);
     }
 
     private void bindViews() {
@@ -128,6 +165,11 @@ public class MainActivity extends AppCompatActivity {
         seekProgress = findViewById(R.id.seekProgress);
         textCurrentTime = findViewById(R.id.textCurrentTime);
         textTotalTime = findViewById(R.id.textTotalTime);
+        textTotalPlayCount = findViewById(R.id.textTotalPlayCount);
+        textClock = findViewById(R.id.textClock);
+        textBattery = findViewById(R.id.textBattery);
+        animationView = findViewById(R.id.animationView);
+        imageThumbnail = findViewById(R.id.imageThumbnail);
 
         buttonPlay.setEnabled(false);
         buttonPlay.setVisibility(View.GONE);
@@ -135,6 +177,7 @@ public class MainActivity extends AppCompatActivity {
         seekProgress.setProgress(0);
         textCurrentTime.setText(formatTime(0));
         textTotalTime.setText(formatTime(0));
+        textTotalPlayCount.setText("0");
         resumePositionMs = 0;
         resumeWhenReady = false;
         recoveringPlayer = false;
@@ -163,49 +206,57 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void setupSurface() {
-        // Keep SurfaceView below normal UI layers so bottom progress area never overlays video content.
-        surfaceView.setZOrderOnTop(false);
-        surfaceView.setZOrderMediaOverlay(false);
-        surfaceHolder = surfaceView.getHolder();
-        surfaceHolder.addCallback(new SurfaceHolder.Callback() {
+        surfaceView.setSurfaceTextureListener(new TextureView.SurfaceTextureListener() {
             @Override
-            public void surfaceCreated(@NonNull SurfaceHolder holder) {
-                surfaceHolder = holder;
-                PlayerLogger.i("Surface", "surfaceCreated");
+            public void onSurfaceTextureAvailable(@NonNull SurfaceTexture st, int width, int height) {
+                surface = new Surface(st);
+                PlayerLogger.i("Surface", "onSurfaceTextureAvailable");
                 attachDisplayIfReady();
+                refreshFrameIfPaused();
                 tryRestorePlaybackIfNeeded();
             }
 
             @Override
-            public void surfaceChanged(@NonNull SurfaceHolder holder, int format, int width, int height) {
-                surfaceHolder = holder;
-                PlayerLogger.i("Surface", "surfaceChanged width=" + width + " height=" + height);
-                attachDisplayIfReady();
+            public void onSurfaceTextureSizeChanged(@NonNull SurfaceTexture st, int width, int height) {
+                PlayerLogger.i("Surface", "onSurfaceTextureSizeChanged w=" + width + " h=" + height);
             }
 
             @Override
-            public void surfaceDestroyed(@NonNull SurfaceHolder holder) {
-                PlayerLogger.w("Surface", "surfaceDestroyed");
+            public boolean onSurfaceTextureDestroyed(@NonNull SurfaceTexture st) {
+                PlayerLogger.w("Surface", "onSurfaceTextureDestroyed");
                 if (mediaPlayer != null) {
                     try {
-                        if (mediaPlayer.isPlaying()) {
+                        boolean wasPlaying = mediaPlayer.isPlaying();
+                        resumePositionMs = safeCurrentPosition();
+                        resumeWhenReady = wasPlaying;
+                        if (wasPlaying) {
                             mediaPlayer.pause();
-                            resumePositionMs = safeCurrentPosition();
-                            resumeWhenReady = false;
                             stopProgressUpdates();
-                            updatePlaybackProgress();
-                            showPlayOverlay();
                         }
+                        mediaPlayer.setSurface(null);
                     } catch (IllegalStateException ignored) {
                     }
                 }
-                surfaceHolder = null;
+                if (surface != null) {
+                    surface.release();
+                    surface = null;
+                }
+                return true;
+            }
+
+            @Override
+            public void onSurfaceTextureUpdated(@NonNull SurfaceTexture st) {
             }
         });
     }
 
     private void setupButtons() {
-        buttonPlay.setOnClickListener(v -> resumePlayback());
+        buttonPlay.setOnClickListener(v -> {
+            if (isListDrawerOpen()) {
+                drawerLayout.closeDrawer(GravityCompat.START);
+            }
+            resumePlayback();
+        });
         buttonToggleList.setOnClickListener(v -> {
             markListInteraction();
             toggleListDrawer();
@@ -299,21 +350,6 @@ public class MainActivity extends AppCompatActivity {
         Collections.sort(videos, (a, b) -> a.getName().compareToIgnoreCase(b.getName()));
         adapter.submit(videos);
 
-        Map<String, Integer> countsByMd5 = dbHelper.queryAllPlayCounts();
-        Map<String, Integer> countsByPath = new HashMap<>();
-        videoMd5ByPath.clear();
-        for (File file : videos) {
-            String path = file.getAbsolutePath();
-            String md5 = FileMd5Utils.md5(file);
-            if (md5 != null) {
-                videoMd5ByPath.put(path, md5);
-                countsByPath.put(path, countsByMd5.getOrDefault(md5, 0));
-            } else {
-                countsByPath.put(path, 0);
-            }
-        }
-        adapter.updatePlayCounts(countsByPath);
-
         if (videos.isEmpty()) {
             PlayerLogger.w("LoadList", "no video found in " + AppConfig.VIDEO_DIR_PATH);
             Toast.makeText(this, R.string.status_no_video_found, Toast.LENGTH_LONG).show();
@@ -332,7 +368,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void playVideo(File file) {
-        if (surfaceHolder == null) {
+        if (surface == null) {
             PlayerLogger.w("Play", "surface not ready, file=" + file.getAbsolutePath());
             Toast.makeText(this, R.string.surface_not_ready, Toast.LENGTH_SHORT).show();
             return;
@@ -342,6 +378,7 @@ public class MainActivity extends AppCompatActivity {
         currentVideoFile = file;
         resumePositionMs = 0;
         resumeWhenReady = true;
+        playCountedForCurrentFile = false;
         createAndPreparePlayer(file, 0, true);
     }
 
@@ -411,6 +448,18 @@ public class MainActivity extends AppCompatActivity {
         seekProgress.setProgress(0);
         textCurrentTime.setText(formatTime(0));
         textTotalTime.setText(formatTime(0));
+        if (videoContainer != null) {
+            videoContainer.setBackgroundColor(0xFFFFFFFF);
+        }
+        if (surfaceView != null) {
+            surfaceView.setVisibility(View.GONE);
+        }
+        if (imageThumbnail != null) {
+            imageThumbnail.setVisibility(View.GONE);
+        }
+        if (animationView != null) {
+            animationView.setVisibility(View.VISIBLE);
+        }
     }
 
     @Override
@@ -473,8 +522,9 @@ public class MainActivity extends AppCompatActivity {
             orientationListener.disable();
         }
         releasePlayer();
-        if (dbHelper != null) {
-            dbHelper.close();
+        progressHandler.removeCallbacks(clockRunnable);
+        if (batteryReceiver != null) {
+            unregisterReceiver(batteryReceiver);
         }
     }
 
@@ -566,11 +616,30 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void attachDisplayIfReady() {
-        if (mediaPlayer == null || !playerPrepared || surfaceHolder == null) {
+        if (mediaPlayer == null || !playerPrepared || surface == null) {
             return;
         }
         try {
-            mediaPlayer.setDisplay(surfaceHolder);
+            mediaPlayer.setSurface(surface);
+        } catch (IllegalStateException ignored) {
+        }
+    }
+
+    private void refreshFrameIfPaused() {
+        if (mediaPlayer == null || !playerPrepared || surface == null) {
+            return;
+        }
+        try {
+            if (!mediaPlayer.isPlaying()) {
+                int pos = resumePositionMs > 0 ? resumePositionMs : safeCurrentPosition();
+                mediaPlayer.seekTo(pos > 0 ? pos : 0);
+                if (resumeWhenReady) {
+                    resumeWhenReady = false;
+                    mediaPlayer.start();
+                    startProgressUpdates();
+                    hidePlayOverlay();
+                }
+            }
         } catch (IllegalStateException ignored) {
         }
     }
@@ -584,7 +653,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void tryRestorePlaybackIfNeeded() {
-        if (recoveringPlayer || currentVideoFile == null || surfaceHolder == null || mediaPlayer != null) {
+        if (recoveringPlayer || currentVideoFile == null || surface == null || mediaPlayer != null) {
             return;
         }
         PlayerLogger.i("PlayRestore", "rebuild player file=" + currentVideoFile.getAbsolutePath()
@@ -600,7 +669,7 @@ public class MainActivity extends AppCompatActivity {
                 + " startMs=" + startPositionMs + " autoStart=" + autoStart);
         try {
             mediaPlayer = new MediaPlayer();
-            mediaPlayer.setDisplay(surfaceHolder);
+            mediaPlayer.setSurface(surface);
             mediaPlayer.setDataSource(file.getAbsolutePath());
             mediaPlayer.setOnVideoSizeChangedListener((mp, width, height) -> applyVideoAspect(width, height));
             mediaPlayer.setOnSeekCompleteListener(mp -> {
@@ -623,6 +692,18 @@ public class MainActivity extends AppCompatActivity {
                 applyVideoAspect(mp.getVideoWidth(), mp.getVideoHeight());
                 seekProgress.setMax(Math.max(1, mp.getDuration()));
                 textTotalTime.setText(formatTime(mp.getDuration()));
+                if (videoContainer != null) {
+                    videoContainer.setBackgroundColor(0x00000000);
+                }
+                if (surfaceView != null) {
+                    surfaceView.setVisibility(View.VISIBLE);
+                }
+                if (imageThumbnail != null) {
+                    imageThumbnail.setVisibility(View.GONE);
+                }
+                if (animationView != null) {
+                    animationView.setVisibility(View.GONE);
+                }
                 if (startPositionMs > 0) {
                     pendingSeekPositionMs = startPositionMs;
                     pendingStartAfterSeek = resumeWhenReady;
@@ -652,22 +733,24 @@ public class MainActivity extends AppCompatActivity {
                 updateScreenAwakeState(false);
                 resumePositionMs = 0;
                 resumeWhenReady = false;
+                countPlayIfNeeded();
+                // Release player so next tap on play rebuilds from scratch cleanly
+                mp.reset();
+                mp.release();
+                mediaPlayer = null;
+                playerPrepared = false;
                 updatePlaybackProgress();
                 showPlayOverlay();
-                if (currentVideoFile != null) {
-                    String path = currentVideoFile.getAbsolutePath();
-                    String md5 = videoMd5ByPath.get(path);
-                    if (md5 == null) {
-                        md5 = FileMd5Utils.md5(currentVideoFile);
-                        if (md5 != null) {
-                            videoMd5ByPath.put(path, md5);
-                        }
-                    }
-                    if (md5 != null) {
-                        int newCount = dbHelper.incrementPlayCount(md5, path, currentVideoFile.getName());
-                        adapter.updateSinglePlayCount(path, newCount);
-                    }
+                if (videoContainer != null) {
+                    videoContainer.setBackgroundColor(0xFFFFFFFF);
                 }
+                if (surfaceView != null) {
+                    surfaceView.setVisibility(View.GONE);
+                }
+                if (currentVideoFile != null && imageThumbnail != null) {
+                    loadAndShowThumbnail(currentVideoFile.getAbsolutePath());
+                }
+                drawerLayout.openDrawer(GravityCompat.START);
             });
             mediaPlayer.setOnErrorListener((mp, what, extra) -> {
                 PlayerLogger.e("MediaError", buildPlayerState("what=" + what + " extra=" + extra), null);
@@ -711,6 +794,12 @@ public class MainActivity extends AppCompatActivity {
             updateScreenAwakeState(true);
             startProgressUpdates();
             hidePlayOverlay();
+            if (imageThumbnail != null) {
+                imageThumbnail.setVisibility(View.GONE);
+            }
+            if (surfaceView != null) {
+                surfaceView.setVisibility(View.VISIBLE);
+            }
         } catch (IllegalStateException e) {
             PlayerLogger.e("Start", buildPlayerState("start_illegal_state"), e);
             handlePlayerFailure();
@@ -732,7 +821,6 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void scheduleAutoHideListAfterPlaybackStart() {
-        listInteractionSincePlaybackStart = false;
         progressHandler.removeCallbacks(autoHideListRunnable);
         progressHandler.postDelayed(autoHideListRunnable, AUTO_HIDE_LIST_DELAY_MS);
     }
@@ -742,8 +830,10 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void markListInteraction() {
-        listInteractionSincePlaybackStart = true;
         cancelAutoHideList();
+        if (isPlayingNow()) {
+            progressHandler.postDelayed(autoHideListRunnable, AUTO_HIDE_LIST_DELAY_MS);
+        }
     }
 
     private String buildPlayerState(String prefix) {
@@ -764,7 +854,7 @@ public class MainActivity extends AppCompatActivity {
                 + " resumeWhenReady=" + resumeWhenReady
                 + " positionMs=" + position
                 + " durationMs=" + duration
-                + " hasSurface=" + (surfaceHolder != null);
+                + " hasSurface=" + (surface != null);
     }
 
     private int safeCurrentPosition() {
@@ -798,8 +888,24 @@ public class MainActivity extends AppCompatActivity {
             seekProgress.setProgress(Math.min(position, duration));
             textCurrentTime.setText(formatTime(position));
             textTotalTime.setText(formatTime(duration));
+            if (!playCountedForCurrentFile && duration > 0 && position >= duration * 0.9f) {
+                countPlayIfNeeded();
+            }
         } catch (IllegalStateException ignored) {
         }
+    }
+
+    private void countPlayIfNeeded() {
+        if (!playCountedForCurrentFile) {
+            playCountedForCurrentFile = true;
+            totalPlayCount++;
+            textTotalPlayCount.setText(String.valueOf(totalPlayCount));
+        }
+    }
+
+    private void updateClock() {
+        if (textClock == null) return;
+        textClock.setText(new SimpleDateFormat("HH:mm", Locale.getDefault()).format(new Date()));
     }
 
     private String formatTime(int millis) {
@@ -844,5 +950,39 @@ public class MainActivity extends AppCompatActivity {
         params.gravity = Gravity.CENTER;
         surfaceView.setLayoutParams(params);
         surfaceView.requestLayout();
+    }
+
+    private void loadAndShowThumbnail(String videoPath) {
+        new Thread(() -> {
+            Bitmap thumbnail = extractVideoThumbnail(videoPath);
+            if (thumbnail != null && imageThumbnail != null) {
+                runOnUiThread(() -> {
+                    imageThumbnail.setImageBitmap(thumbnail);
+                    imageThumbnail.setVisibility(View.VISIBLE);
+                });
+            }
+        }).start();
+    }
+
+    private Bitmap extractVideoThumbnail(String videoPath) {
+        MediaMetadataRetriever retriever = new MediaMetadataRetriever();
+        try {
+            retriever.setDataSource(videoPath);
+            String durationStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION);
+            long durationMs = durationStr != null ? Long.parseLong(durationStr) : 0;
+            long seekUs = durationMs > 0 ? (durationMs / 2) * 1000L : 0L;
+            Bitmap frame = retriever.getFrameAtTime(seekUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC);
+            if (frame == null) {
+                frame = retriever.getFrameAtTime();
+            }
+            return frame;
+        } catch (RuntimeException e) {
+            return null;
+        } finally {
+            try {
+                retriever.release();
+            } catch (Exception ignored) {
+            }
+        }
     }
 }

@@ -2,6 +2,7 @@ package com.example.viewerguard;
 
 import android.content.Context;
 import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.media.MediaMetadataRetriever;
 import android.os.Handler;
 import android.os.Looper;
@@ -14,10 +15,10 @@ import android.widget.ImageView;
 import android.widget.TextView;
 
 import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -25,37 +26,30 @@ public class VideoFileAdapter extends BaseAdapter {
     private static final int NAME_MAX_LENGTH = 24;
     private final LayoutInflater inflater;
     private final List<File> files = new ArrayList<>();
-    private final Map<String, Integer> playCounts = new HashMap<>();
-    private final LruCache<String, Bitmap> thumbnailCache;
+    private final LruCache<String, Bitmap> memCache;
     private final ExecutorService thumbnailExecutor = Executors.newFixedThreadPool(2);
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private final File diskCacheDir;
 
     public VideoFileAdapter(Context context) {
         this.inflater = LayoutInflater.from(context);
         int maxKb = (int) (Runtime.getRuntime().maxMemory() / 1024);
         int cacheSizeKb = Math.max(1024, maxKb / 20);
-        this.thumbnailCache = new LruCache<String, Bitmap>(cacheSizeKb) {
+        this.memCache = new LruCache<String, Bitmap>(cacheSizeKb) {
             @Override
             protected int sizeOf(String key, Bitmap value) {
                 return value.getByteCount() / 1024;
             }
         };
+        this.diskCacheDir = new File(context.getCacheDir(), "thumbs");
+        if (!diskCacheDir.exists()) {
+            diskCacheDir.mkdirs();
+        }
     }
 
     public void submit(List<File> items) {
         files.clear();
         files.addAll(items);
-        notifyDataSetChanged();
-    }
-
-    public void updatePlayCounts(Map<String, Integer> counts) {
-        playCounts.clear();
-        playCounts.putAll(counts);
-        notifyDataSetChanged();
-    }
-
-    public void updateSinglePlayCount(String videoPath, int count) {
-        playCounts.put(videoPath, count);
         notifyDataSetChanged();
     }
 
@@ -94,12 +88,6 @@ public class VideoFileAdapter extends BaseAdapter {
         String path = file.getAbsolutePath();
 
         holder.textName.setText(truncateName(file.getName()));
-
-        int count = 0;
-        if (playCounts.containsKey(path)) {
-            count = playCounts.get(path);
-        }
-        holder.textCount.setText(parent.getContext().getString(R.string.play_count_list_format, count));
         loadThumbnail(holder.imageThumb, path);
 
         return view;
@@ -114,33 +102,77 @@ public class VideoFileAdapter extends BaseAdapter {
 
     private void loadThumbnail(ImageView imageView, String videoPath) {
         imageView.setTag(videoPath);
-        Bitmap cached = thumbnailCache.get(videoPath);
+
+        // 1. memory cache
+        Bitmap cached = memCache.get(videoPath);
         if (cached != null) {
             imageView.setImageBitmap(cached);
             return;
         }
 
+        // 2. Try disk cache synchronously for immediate result
+        File diskFile = diskCacheFile(videoPath);
+        if (diskFile.exists()) {
+            try {
+                Bitmap diskBitmap = BitmapFactory.decodeFile(diskFile.getAbsolutePath());
+                if (diskBitmap != null) {
+                    imageView.setImageBitmap(diskBitmap);
+                    memCache.put(videoPath, diskBitmap);
+                    return;
+                }
+            } catch (Exception ignored) {
+            }
+        }
+
+        // 3. Show placeholder and extract in background
         imageView.setImageResource(android.R.drawable.ic_menu_gallery);
         thumbnailExecutor.execute(() -> {
             Bitmap bitmap = extractThumbnail(videoPath);
-            if (bitmap == null) {
-                return;
+            if (bitmap != null) {
+                saveToDiskCache(videoPath, bitmap);
+                memCache.put(videoPath, bitmap);
+                mainHandler.post(() -> {
+                    if (videoPath.equals(imageView.getTag())) {
+                        imageView.setImageBitmap(bitmap);
+                    }
+                });
             }
-            thumbnailCache.put(videoPath, bitmap);
-            mainHandler.post(() -> {
-                Object tag = imageView.getTag();
-                if (videoPath.equals(tag)) {
-                    imageView.setImageBitmap(bitmap);
-                }
-            });
         });
+    }
+
+    private File diskCacheFile(String videoPath) {
+        // Use a simple hash of the path as filename
+        String name = Integer.toHexString(videoPath.hashCode()) + ".jpg";
+        return new File(diskCacheDir, name);
+    }
+
+    private Bitmap loadFromDiskCache(String videoPath) {
+        File f = diskCacheFile(videoPath);
+        if (!f.exists()) return null;
+        try {
+            return BitmapFactory.decodeFile(f.getAbsolutePath());
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private void saveToDiskCache(String videoPath, Bitmap bitmap) {
+        File f = diskCacheFile(videoPath);
+        try (FileOutputStream out = new FileOutputStream(f)) {
+            bitmap.compress(Bitmap.CompressFormat.JPEG, 80, out);
+        } catch (IOException ignored) {
+        }
     }
 
     private Bitmap extractThumbnail(String videoPath) {
         MediaMetadataRetriever retriever = new MediaMetadataRetriever();
         try {
             retriever.setDataSource(videoPath);
-            Bitmap frame = retriever.getFrameAtTime(1_000_000L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC);
+            // Get duration, seek to middle
+            String durationStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION);
+            long durationMs = durationStr != null ? Long.parseLong(durationStr) : 0;
+            long seekUs = durationMs > 0 ? (durationMs / 2) * 1000L : 0L;
+            Bitmap frame = retriever.getFrameAtTime(seekUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC);
             if (frame == null) {
                 frame = retriever.getFrameAtTime();
             }
@@ -157,12 +189,10 @@ public class VideoFileAdapter extends BaseAdapter {
 
     private static class ViewHolder {
         final TextView textName;
-        final TextView textCount;
         final ImageView imageThumb;
 
         ViewHolder(View itemView) {
             textName = itemView.findViewById(R.id.textVideoName);
-            textCount = itemView.findViewById(R.id.textVideoCount);
             imageThumb = itemView.findViewById(R.id.imageVideoThumb);
         }
     }
