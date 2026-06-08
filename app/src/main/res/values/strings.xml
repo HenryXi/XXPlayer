@@ -2,7 +2,6 @@
 <resources>
     <string name="app_name">XXPlayer</string>
     <string name="resume_playback">继续播放</string>
-    <string name="play_count_list_format">已播放 %1$d 次</string>
     <string name="status_dir_missing">视频目录不存在，请检查路径</string>
     <string name="status_no_video_found">目录中没有可播放视频</string>
     <string name="status_player_error">播放器错误</string>

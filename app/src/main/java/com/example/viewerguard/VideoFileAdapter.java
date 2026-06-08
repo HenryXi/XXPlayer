@@ -146,16 +146,6 @@ public class VideoFileAdapter extends BaseAdapter {
         return new File(diskCacheDir, name);
     }
 
-    private Bitmap loadFromDiskCache(String videoPath) {
-        File f = diskCacheFile(videoPath);
-        if (!f.exists()) return null;
-        try {
-            return BitmapFactory.decodeFile(f.getAbsolutePath());
-        } catch (Exception ignored) {
-            return null;
-        }
-    }
-
     private void saveToDiskCache(String videoPath, Bitmap bitmap) {
         File f = diskCacheFile(videoPath);
         try (FileOutputStream out = new FileOutputStream(f)) {
