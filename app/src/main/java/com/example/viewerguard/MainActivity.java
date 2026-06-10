@@ -17,7 +17,6 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.graphics.SurfaceTexture;
 import android.view.Gravity;
-import android.view.OrientationEventListener;
 import android.view.Surface;
 import android.view.TextureView;
 import android.view.View;
@@ -95,9 +94,6 @@ public class MainActivity extends AppCompatActivity {
     private boolean recoveringPlayer;
     private int pendingSeekPositionMs;
     private boolean pendingStartAfterSeek;
-    private OrientationEventListener orientationListener;
-    private int baselineLandscapeOrientation = -1;
-    private float currentVideoRotation;
     private boolean keepScreenOnActive;
     private final Runnable autoHideListRunnable = new Runnable() {
         @Override
@@ -128,7 +124,6 @@ public class MainActivity extends AppCompatActivity {
         setupList();
         setupSurface();
         setupButtons();
-        setupOrientationCorrection();
 
         if (hasRequiredPermissions()) {
             PlayerLogger.i("Permission", "granted at startup");
@@ -183,9 +178,7 @@ public class MainActivity extends AppCompatActivity {
         recoveringPlayer = false;
         pendingSeekPositionMs = 0;
         pendingStartAfterSeek = false;
-        currentVideoRotation = 0f;
         keepScreenOnActive = false;
-        surfaceView.setRotation(currentVideoRotation);
         updateScreenAwakeState(false);
 
         setupListDrawer();
@@ -467,9 +460,6 @@ public class MainActivity extends AppCompatActivity {
         super.onPause();
         PlayerLogger.i("Lifecycle", "onPause playing=" + isPlayingNow());
         updateScreenAwakeState(false);
-        if (orientationListener != null) {
-            orientationListener.disable();
-        }
         if (mediaPlayer != null && mediaPlayer.isPlaying()) {
             mediaPlayer.pause();
             resumePositionMs = safeCurrentPosition();
@@ -507,9 +497,6 @@ public class MainActivity extends AppCompatActivity {
     protected void onResume() {
         super.onResume();
         PlayerLogger.i("Lifecycle", "onResume");
-        if (orientationListener != null && orientationListener.canDetectOrientation()) {
-            orientationListener.enable();
-        }
         attachDisplayIfReady();
         tryRestorePlaybackIfNeeded();
     }
@@ -518,52 +505,11 @@ public class MainActivity extends AppCompatActivity {
     protected void onDestroy() {
         super.onDestroy();
         PlayerLogger.i("Lifecycle", "onDestroy");
-        if (orientationListener != null) {
-            orientationListener.disable();
-        }
         releasePlayer();
         progressHandler.removeCallbacks(clockRunnable);
         if (batteryReceiver != null) {
             unregisterReceiver(batteryReceiver);
         }
-    }
-
-    private void setupOrientationCorrection() {
-        orientationListener = new OrientationEventListener(this) {
-            @Override
-            public void onOrientationChanged(int orientation) {
-                if (orientation == ORIENTATION_UNKNOWN) {
-                    return;
-                }
-                int snapped = snapToRightAngle(orientation);
-                if (snapped != 90 && snapped != 270) {
-                    return;
-                }
-                if (baselineLandscapeOrientation == -1) {
-                    baselineLandscapeOrientation = snapped;
-                }
-                float targetRotation = snapped == baselineLandscapeOrientation ? 0f : 180f;
-                applyVideoRotation(targetRotation);
-            }
-        };
-        if (orientationListener.canDetectOrientation()) {
-            orientationListener.enable();
-        }
-    }
-
-    private int snapToRightAngle(int orientation) {
-        return ((orientation + 45) / 90 * 90) % 360;
-    }
-
-    private void applyVideoRotation(float targetRotation) {
-        if (Float.compare(currentVideoRotation, targetRotation) == 0) {
-            return;
-        }
-        currentVideoRotation = targetRotation;
-        surfaceView.animate()
-                .rotation(targetRotation)
-                .setDuration(220)
-                .start();
     }
 
     @Override
