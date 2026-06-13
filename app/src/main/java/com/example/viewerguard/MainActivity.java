@@ -234,7 +234,11 @@ public class MainActivity extends AppCompatActivity {
                     surface.release();
                     surface = null;
                 }
-                return true;
+                // Return false so the system does not release the SurfaceTexture.
+                // On Android 4.x, returning true causes onSurfaceTextureAvailable to
+                // never fire again after returning from background, leaving surface
+                // permanently null.
+                return false;
             }
 
             @Override
@@ -361,17 +365,17 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void playVideo(File file) {
-        if (surface == null) {
-            PlayerLogger.w("Play", "surface not ready, file=" + file.getAbsolutePath());
-            Toast.makeText(this, R.string.surface_not_ready, Toast.LENGTH_SHORT).show();
-            return;
-        }
-
         PlayerLogger.i("Play", "select file=" + file.getAbsolutePath());
         currentVideoFile = file;
         resumePositionMs = 0;
         resumeWhenReady = true;
         playCountedForCurrentFile = false;
+        if (surface == null) {
+            // Surface not yet ready; tryRestorePlaybackIfNeeded will start playback
+            // once onSurfaceTextureAvailable fires.
+            PlayerLogger.w("Play", "surface not ready, will start when surface is available");
+            return;
+        }
         createAndPreparePlayer(file, 0, true);
     }
 
@@ -489,14 +493,24 @@ public class MainActivity extends AppCompatActivity {
         if (mediaPlayer != null) {
             resumePositionMs = safeCurrentPosition();
         }
-        resumeWhenReady = false;
         releasePlayer();
+        // On Android 4.x the SurfaceTexture is permanently destroyed when going to background
+        // and onSurfaceTextureAvailable never fires again. Finishing here forces a clean
+        // Activity recreation the next time the user returns, guaranteeing a fresh Surface.
+        finish();
     }
 
     @Override
     protected void onResume() {
         super.onResume();
         PlayerLogger.i("Lifecycle", "onResume");
+        // On some devices/versions (e.g. Android 4.4), onSurfaceTextureAvailable is not called
+        // again after returning from background if the SurfaceTexture is already available.
+        // Manually re-create the Surface here to ensure it's ready.
+        if (surface == null && surfaceView.isAvailable()) {
+            PlayerLogger.i("Surface", "onResume: SurfaceTexture already available, creating Surface manually");
+            surface = new Surface(surfaceView.getSurfaceTexture());
+        }
         attachDisplayIfReady();
         tryRestorePlaybackIfNeeded();
     }
@@ -611,6 +625,7 @@ public class MainActivity extends AppCompatActivity {
         releasePlayer();
         resumeWhenReady = autoStart;
         recoveringPlayer = true;
+        playCountedForCurrentFile = false;
         PlayerLogger.i("Prepare", "create player file=" + file.getAbsolutePath()
                 + " startMs=" + startPositionMs + " autoStart=" + autoStart);
         try {
